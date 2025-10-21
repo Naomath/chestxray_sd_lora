@@ -140,7 +140,7 @@ def main():
             ) from exc
 
         project_name = cfg.wandb_project or "chestxray_sd_lora"
-        wandb_kwargs = {"project": project_name}
+        wandb_kwargs = {}
         if cfg.wandb_run_name:
             wandb_kwargs["name"] = cfg.wandb_run_name
         if cfg.wandb_entity:
@@ -150,7 +150,6 @@ def main():
         if cfg.wandb_tags:
             wandb_kwargs["tags"] = cfg.wandb_tags
         accelerator.init_trackers(project_name, config=dict(cfg.__dict__), init_kwargs={"wandb": wandb_kwargs})
-        print('Weights & Biases logging enabled.')
 
     set_seed(cfg.seed + accelerator.process_index)
 
@@ -246,6 +245,7 @@ def main():
             prompt = sample_prompts[prompt_idx]
             filename = f"step{step:06d}_prompt{prompt_idx:02d}_img{sample_idx:02d}.png"
             img_path = os.path.join(samples_dir, filename)
+            img = img.convert('L')  # convert to grayscale
             img.save(img_path)
             wandb_images.append(
                 wandb_module.Image(

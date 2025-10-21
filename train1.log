@@ -3,6 +3,24 @@ nohup: ignoring input
   warnings.warn(
 /home/goto/chestxray_sd_lora/.venv/lib/python3.12/site-packages/pydantic/_internal/_generate_schema.py:2249: UnsupportedFieldAttributeWarning: The 'frozen' attribute with value True was provided to the `Field()` function, which has no effect in the context it was used. 'frozen' is field-specific metadata, and can only be attached to a model field using `Annotated` metadata or by assignment. This may have happened because an `Annotated` type alias using the `type` statement was used, or if the `Field()` function was attached to a single member of a union type.
   warnings.warn(
-Wands & Biases logging enabled.
+wandb: Currently logged in as: math1972naonao (math1972naonao-the-university-of-tokyo) to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
+wandb: setting up run i93kqhyu
+wandb: Tracking run with wandb version 0.22.2
+wandb: Run data is saved locally in /home/goto/chestxray_sd_lora/wandb/run-20251021_173710-i93kqhyu
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run frosty-mountain-3
+wandb: ⭐️ View project at https://wandb.ai/math1972naonao-the-university-of-tokyo/sd_sora_train
+wandb: 🚀 View run at https://wandb.ai/math1972naonao-the-university-of-tokyo/sd_sora_train/runs/i93kqhyu
 /home/goto/chestxray_sd_lora/.venv/lib/python3.12/site-packages/diffusers/loaders/unet.py:484: FutureWarning: `save_attn_procs` is deprecated and will be removed in version 0.40.0. Using the `save_attn_procs()` method has been deprecated and will be removed in a future version. Please use `save_lora_adapter()`.
   deprecate("save_attn_procs", "0.40.0", deprecation_message)
+Loading pipeline components...:   0%|          | 0/6 [00:00<?, ?it/s]`torch_dtype` is deprecated! Use `dtype` instead!
+Loading pipeline components...:  17%|█▋        | 1/6 [00:00<00:00,  7.30it/s]Loading pipeline components...:  83%|████████▎ | 5/6 [00:00<00:00, 19.74it/s]Loading pipeline components...: 100%|██████████| 6/6 [00:01<00:00,  5.37it/s]
+You have disabled the safety checker for <class 'diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline'> by passing `safety_checker=None`. Ensure that you abide to the conditions of the Stable Diffusion license and do not expose unfiltered results in services or applications open to the public. Both the diffusers team and Hugging Face strongly recommend to keep the safety filter enabled in all public facing circumstances, disabling it only for use-cases that involve analyzing network behavior or auditing its results. For more information, please have a look at https://github.com/huggingface/diffusers/pull/254 .
+/home/goto/chestxray_sd_lora/.venv/lib/python3.12/site-packages/diffusers/loaders/unet.py:214: FutureWarning: `load_attn_procs` is deprecated and will be removed in version 0.40.0. Using the `load_attn_procs()` method has been deprecated and will be removed in a future version. Please use `load_lora_adapter()`.
+  deprecate("load_attn_procs", "0.40.0", deprecation_message)
+/home/goto/chestxray_sd_lora/.venv/lib/python3.12/site-packages/diffusers/loaders/unet.py:484: FutureWarning: `save_attn_procs` is deprecated and will be removed in version 0.40.0. Using the `save_attn_procs()` method has been deprecated and will be removed in a future version. Please use `save_lora_adapter()`.
+  deprecate("save_attn_procs", "0.40.0", deprecation_message)
+/home/goto/chestxray_sd_lora/.venv/lib/python3.12/site-packages/diffusers/loaders/unet.py:214: FutureWarning: `load_attn_procs` is deprecated and will be removed in version 0.40.0. Using the `load_attn_procs()` method has been deprecated and will be removed in a future version. Please use `load_lora_adapter()`.
+  deprecate("load_attn_procs", "0.40.0", deprecation_message)
+/home/goto/chestxray_sd_lora/.venv/lib/python3.12/site-packages/peft/tuners/tuners_utils.py:196: UserWarning: Already found a `peft_config` attribute in the model. This will lead to having multiple adapters in the model. Make sure to know what you are doing!
+  warnings.warn(
