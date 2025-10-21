@@ -41,6 +41,7 @@ class TrainConfig:
     wandb_entity: Optional[str] = None
     wandb_group: Optional[str] = None
     wandb_tags: Optional[List[str]] = None
+    training_mode: str = "lora"  # "lora" or "full"
     sample_prompts: List[str] = field(default_factory=lambda: ["chest x-ray, normal"])
     samples_per_prompt: int = 1
     sample_num_inference_steps: int = 30
@@ -79,6 +80,7 @@ def get_args():
     ap.add_argument('--sample_num_inference_steps', type=int, default=None, help='Inference steps for checkpoint sampling.')
     ap.add_argument('--sample_guidance_scale', type=float, default=None, help='Guidance scale for checkpoint sampling.')
     ap.add_argument('--sample_seed', type=int, default=None, help='Seed offset for checkpoint sampling (defaults to training seed).')
+    ap.add_argument('--training_mode', type=str, default=None, choices=['lora', 'full'], help='Training strategy: LoRA adapters or full fine-tuning.')
     return ap.parse_args()
 
 def load_config(args):
@@ -111,6 +113,11 @@ def load_config(args):
         cfg['sample_prompts'] = [t.strip() for t in prompts.split(',') if t.strip()]
     if not cfg.get('sample_prompts'):
         cfg['sample_prompts'] = ["chest x-ray, normal"]
+    mode = str(cfg.get('training_mode', 'lora')).lower()
+    if mode not in ('lora', 'full'):
+        logger.warning(f"Unknown training_mode '{mode}', defaulting to 'lora'.")
+        mode = 'lora'
+    cfg['training_mode'] = mode
     try:
         cfg['samples_per_prompt'] = max(1, int(cfg.get('samples_per_prompt', 1)))
     except (TypeError, ValueError):
@@ -125,7 +132,6 @@ def main():
     accelerator = Accelerator(
         gradient_accumulation_steps=cfg.grad_accum_steps,
         mixed_precision=cfg.mixed_precision,
-        log_with="wandb" if cfg.wandb_enabled else None,
     )
     logger.info(accelerator.state, main_process_only=False)
 
@@ -140,7 +146,7 @@ def main():
             ) from exc
 
         project_name = cfg.wandb_project or "chestxray_sd_lora"
-        wandb_kwargs = {}
+        wandb_kwargs = {"project": project_name}
         if cfg.wandb_run_name:
             wandb_kwargs["name"] = cfg.wandb_run_name
         if cfg.wandb_entity:
@@ -168,20 +174,19 @@ def main():
     text_encoder.requires_grad_(False)
 
     # Add LoRA processors to UNet attention
-    lora_rank = cfg.lora_rank
-    lora_alpha = cfg.lora_alpha
-    lora_dropout = cfg.lora_dropout
-
-    # UNet のアテンションに挿す典型モジュール
-    lora_config = LoraConfig(
-        r=lora_rank,
-        lora_alpha=lora_alpha,
-        lora_dropout=lora_dropout,
-        init_lora_weights="gaussian",
-        target_modules=["to_q", "to_k", "to_v", "to_out.0"],
-    )
-    
-    unet.add_adapter(lora_config)        
+    train_lora = cfg.training_mode == "lora"
+    if train_lora:
+        lora_config = LoraConfig(
+            r=cfg.lora_rank,
+            lora_alpha=cfg.lora_alpha,
+            lora_dropout=cfg.lora_dropout,
+            init_lora_weights="gaussian",
+            target_modules=["to_q", "to_k", "to_v", "to_out.0"],
+        )
+        unet.requires_grad_(False)
+        unet.add_adapter(lora_config)
+    else:
+        unet.requires_grad_(True)
     
     # Dataset & Dataloader
     dataset = ChestXrayDataset(args.dataset_dir, resolution=cfg.resolution)
@@ -208,7 +213,7 @@ def main():
     sample_prompts = list(cfg.sample_prompts or ["chest x-ray, normal"])
     samples_per_prompt = max(1, cfg.samples_per_prompt)
     sample_pipeline = None
-    def generate_and_log_samples(step: int, adapter_dir: str):
+    def generate_and_log_samples(step: int, weights_dir: str):
         nonlocal sample_pipeline
         if not (cfg.wandb_enabled and wandb_module is not None and accelerator.is_main_process):
             return
@@ -221,7 +226,14 @@ def main():
             )
             sample_pipeline.set_progress_bar_config(disable=True)
             sample_pipeline = sample_pipeline.to(accelerator.device)
-        sample_pipeline.unet.load_attn_procs(adapter_dir)
+        if train_lora:
+            sample_pipeline.unet.load_attn_procs(weights_dir)
+        else:
+            finetuned_unet = UNet2DConditionModel.from_pretrained(
+                weights_dir,
+                torch_dtype=pipeline_dtype,
+            )
+            sample_pipeline.unet = finetuned_unet.to(accelerator.device)
         generator_device = accelerator.device if accelerator.device.type != "meta" else torch.device("cpu")
         generator = torch.Generator(device=generator_device)
         base_seed = cfg.sample_seed if cfg.sample_seed is not None else cfg.seed
@@ -236,7 +248,7 @@ def main():
                 generator=generator,
             )
         images = outputs.images
-        samples_dir = os.path.join(adapter_dir, "samples")
+        samples_dir = os.path.join(weights_dir, "samples")
         os.makedirs(samples_dir, exist_ok=True)
         wandb_images = []
         for idx, img in enumerate(images):
@@ -245,7 +257,6 @@ def main():
             prompt = sample_prompts[prompt_idx]
             filename = f"step{step:06d}_prompt{prompt_idx:02d}_img{sample_idx:02d}.png"
             img_path = os.path.join(samples_dir, filename)
-            img = img.convert('L')  # convert to grayscale
             img.save(img_path)
             wandb_images.append(
                 wandb_module.Image(
@@ -333,9 +344,13 @@ def main():
                     # Save LoRA weights
                     save_dir = os.path.join(args.output_dir, f"checkpoint-{global_step}")
                     os.makedirs(save_dir, exist_ok=True)
-                    save_path = os.path.join(save_dir, 'lora_unet')
+                    weight_subdir = 'lora_unet' if train_lora else 'unet'
+                    save_path = os.path.join(save_dir, weight_subdir)
                     unwrapped = accelerator.unwrap_model(unet)
-                    unwrapped.save_attn_procs(save_path)
+                    if train_lora:
+                        unwrapped.save_attn_procs(save_path)
+                    else:
+                        unwrapped.save_pretrained(save_path)
                     logger.info(f"Saved checkpoint to {save_dir}")
                     if cfg.wandb_enabled:
                         accelerator.log({"checkpoint/step": global_step}, step=global_step)
@@ -349,10 +364,14 @@ def main():
 
     # Final save
     if accelerator.is_main_process:
-        final_dir = os.path.join(args.output_dir, 'lora_unet')
+        weight_subdir = 'lora_unet' if train_lora else 'unet'
+        final_dir = os.path.join(args.output_dir, weight_subdir)
         unwrapped = accelerator.unwrap_model(unet)
-        unwrapped.save_attn_procs(final_dir)
-        logger.info(f"Training complete. LoRA weights saved to {final_dir}")
+        if train_lora:
+            unwrapped.save_attn_procs(final_dir)
+        else:
+            unwrapped.save_pretrained(final_dir)
+        logger.info(f"Training complete. Weights saved to {final_dir}")
         if cfg.wandb_enabled:
             generate_and_log_samples(global_step, final_dir)
 
