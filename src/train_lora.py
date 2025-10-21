@@ -10,9 +10,11 @@ from accelerate import Accelerator
 from accelerate.logging import get_logger
 
 from diffusers import AutoencoderKL, UNet2DConditionModel, DDPMScheduler
-from diffusers import StableDiffusionPipeline
+try:
+    from diffusers import LoRAConfig
+except ImportError:  # pragma: no cover - older diffusers fallback
+    LoRAConfig = None
 from diffusers.loaders import AttnProcsLayers
-from diffusers.models.attention_processor import LoRAAttnProcessor
 from transformers import CLIPTextModel, CLIPTokenizer
 
 from .dataset import ChestXrayDataset
@@ -150,15 +152,22 @@ def main():
     lora_dropout = cfg.lora_dropout
 
     def _set_lora(unet):
-        lora_attn_procs = {}
-        for name, module in unet.named_modules():
-            if hasattr(module, 'set_processor'):
-                # lora_attn_procs[name] = LoRAAttnProcessor(rank=lora_rank, network_alpha=lora_alpha)
-                lora_attn_procs[name] = LoRAAttnProcessor(rank=lora_rank, network_alpha=lora_alpha, dropout=lora_dropout)
-        unet.set_attn_processor(lora_attn_procs)
+        adapter_name = "default"
+        lora_config = LoRAConfig(
+                    r=lora_rank,
+                    lora_alpha=lora_alpha,
+                    lora_dropout=lora_dropout,
+                    init_lora_weights="gaussian",
+                )
+        unet.add_adapter(adapter_name=adapter_name, config=lora_config)
+        unet.set_adapter(adapter_name) 
+        return adapter_name
 
-    _set_lora(unet)
-    attn_procs = AttnProcsLayers(unet.attn_processors)
+    adapter_name = _set_lora(unet)
+    try:
+        attn_procs = AttnProcsLayers(unet.attn_processors, adapter_name=adapter_name)
+    except TypeError:
+        attn_procs = AttnProcsLayers(unet.attn_processors)
 
     # Dataset & Dataloader
     dataset = ChestXrayDataset(args.dataset_dir, resolution=cfg.resolution)
@@ -241,7 +250,12 @@ def main():
                     # Save LoRA weights
                     save_dir = os.path.join(args.output_dir, f"checkpoint-{global_step}")
                     os.makedirs(save_dir, exist_ok=True)
-                    unet.module.save_attn_procs(os.path.join(save_dir, 'lora_unet'))
+                    save_path = os.path.join(save_dir, 'lora_unet')
+                    unwrapped = accelerator.unwrap_model(unet)
+                    try:
+                        unwrapped.save_attn_procs(save_path, adapter_name=adapter_name)
+                    except TypeError:
+                        unwrapped.save_attn_procs(save_path)
                     logger.info(f"Saved checkpoint to {save_dir}")
                     if cfg.wandb_enabled:
                         accelerator.log({"checkpoint/step": global_step}, step=global_step)
@@ -255,7 +269,11 @@ def main():
     # Final save
     if accelerator.is_main_process:
         final_dir = os.path.join(args.output_dir, 'lora_unet')
-        unet.module.save_attn_procs(final_dir)
+        unwrapped = accelerator.unwrap_model(unet)
+        try:
+            unwrapped.save_attn_procs(final_dir, adapter_name=adapter_name)
+        except TypeError:
+            unwrapped.save_attn_procs(final_dir)
         logger.info(f"Training complete. LoRA weights saved to {final_dir}")
 
     accelerator.wait_for_everyone()
