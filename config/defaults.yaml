@@ -1,0 +1,23 @@
+
+model_id: runwayml/stable-diffusion-v1-5
+resolution: 256
+train_batch_size: 16
+grad_accum_steps: 1
+learning_rate: 5.0e-5
+max_train_steps: 20000
+checkpointing_steps: 1000
+mixed_precision: bf16
+lora_rank: 16
+lora_alpha: 16
+lora_dropout: 0.0
+noise_scheduler: "EulerAncestralDiscreteScheduler"
+num_workers: 8
+seed: 42
+use_8bit_adam: false
+enable_sdp: true
+wandb_enabled: false
+wandb_project:
+wandb_run_name:
+wandb_entity:
+wandb_group:
+wandb_tags: []

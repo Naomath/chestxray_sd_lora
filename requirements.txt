@@ -1,0 +1,12 @@
+
+torch>=2.2
+accelerate>=0.34.2
+diffusers>=0.30.0
+transformers>=4.43.0
+safetensors>=0.4.3
+datasets>=2.20.0
+opencv-python>=4.9.0
+Pillow>=10.3.0
+pyyaml>=6.0.2
+tqdm>=4.66.4
+wandb>=0.17.0
