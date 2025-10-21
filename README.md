@@ -17,6 +17,12 @@ Stable Diffusion の UNet を LoRA で微調整し、**256×256 の胸部 X 線�
    ```
    `pyproject.toml` に定義された依存関係が `.venv/` にインストールされ、必要に応じて `uv.lock` が生成されます。
 
+3. compileとimportが通るかの確認
+   ```bash
+   uv run python -m compileall src
+   uv run python -c "import src.train_lora"
+   ```
+
 ### 1) データセットの用意
 約 20,000 枚の胸部 X 線 **正常**画像を以下のようなディレクトリに配置します。
 ```
@@ -36,8 +42,8 @@ uv run accelerate config default
 
 ### 3) 学習（単一 GPU 想定）
 ```bash
-uv run accelerate launch src/train_lora.py \
-  --dataset_dir /path/to/dataset \
+nohup uv run accelerate launch --module src.train_lora \
+  --dataset_dir /home/goto/mask_diffusion/data/images/train_normal_256 \
   --model_id runwayml/stable-diffusion-v1-5 \
   --output_dir ./outputs/exp1 \
   --resolution 256 \
@@ -48,7 +54,10 @@ uv run accelerate launch src/train_lora.py \
   --max_train_steps 20000 \
   --lora_rank 16 \
   --lora_alpha 16 \
-  --checkpointing_steps 1000
+  --checkpointing_steps 1000 \
+  --wandb \
+  --wandb_project sd_sora_train \
+  > train.log 2>&1 &
 ```
 
 メモ:

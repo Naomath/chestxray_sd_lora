@@ -153,7 +153,8 @@ def main():
         lora_attn_procs = {}
         for name, module in unet.named_modules():
             if hasattr(module, 'set_processor'):
-                lora_attn_procs[name] = LoRAAttnProcessor(hidden_size=module.to_q.in_features, rank=lora_rank, network_alpha=lora_alpha)
+                # lora_attn_procs[name] = LoRAAttnProcessor(rank=lora_rank, network_alpha=lora_alpha)
+                lora_attn_procs[name] = LoRAAttnProcessor(rank=lora_rank, network_alpha=lora_alpha, dropout=lora_dropout)
         unet.set_attn_processor(lora_attn_procs)
 
     _set_lora(unet)
