@@ -1,6 +1,6 @@
 
 import argparse, os, math, yaml
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, List
 
 import torch
@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 
-from diffusers import AutoencoderKL, UNet2DConditionModel, DDPMScheduler
+from diffusers import AutoencoderKL, UNet2DConditionModel, DDPMScheduler, StableDiffusionPipeline
 from peft import LoraConfig
 from diffusers.loaders import AttnProcsLayers
 from transformers import CLIPTextModel, CLIPTokenizer
@@ -41,6 +41,11 @@ class TrainConfig:
     wandb_entity: Optional[str] = None
     wandb_group: Optional[str] = None
     wandb_tags: Optional[List[str]] = None
+    sample_prompts: List[str] = field(default_factory=lambda: ["chest x-ray, normal"])
+    samples_per_prompt: int = 1
+    sample_num_inference_steps: int = 30
+    sample_guidance_scale: float = 7.5
+    sample_seed: Optional[int] = None
 
 def get_args():
     ap = argparse.ArgumentParser()
@@ -69,6 +74,11 @@ def get_args():
     ap.add_argument('--wandb_entity', type=str, default=None, help='Optional W&B entity.')
     ap.add_argument('--wandb_group', type=str, default=None, help='Optional W&B group.')
     ap.add_argument('--wandb_tags', type=str, default=None, help='Comma-separated W&B tags.')
+    ap.add_argument('--sample_prompts', type=str, default=None, help='Comma-separated prompts for checkpoint sampling.')
+    ap.add_argument('--samples_per_prompt', type=int, default=None, help='Number of images to sample per prompt at checkpoints.')
+    ap.add_argument('--sample_num_inference_steps', type=int, default=None, help='Inference steps for checkpoint sampling.')
+    ap.add_argument('--sample_guidance_scale', type=float, default=None, help='Guidance scale for checkpoint sampling.')
+    ap.add_argument('--sample_seed', type=int, default=None, help='Seed offset for checkpoint sampling (defaults to training seed).')
     return ap.parse_args()
 
 def load_config(args):
@@ -96,6 +106,15 @@ def load_config(args):
     tags = cfg.get('wandb_tags')
     if isinstance(tags, str):
         cfg['wandb_tags'] = [t.strip() for t in tags.split(',') if t.strip()]
+    prompts = cfg.get('sample_prompts')
+    if isinstance(prompts, str):
+        cfg['sample_prompts'] = [t.strip() for t in prompts.split(',') if t.strip()]
+    if not cfg.get('sample_prompts'):
+        cfg['sample_prompts'] = ["chest x-ray, normal"]
+    try:
+        cfg['samples_per_prompt'] = max(1, int(cfg.get('samples_per_prompt', 1)))
+    except (TypeError, ValueError):
+        cfg['samples_per_prompt'] = 1
     return TrainConfig(**cfg)
 
 def main():
@@ -103,12 +122,17 @@ def main():
     cfg = load_config(args)
     os.makedirs(args.output_dir, exist_ok=True)
 
-    accelerator = Accelerator(gradient_accumulation_steps=cfg.grad_accum_steps, mixed_precision=cfg.mixed_precision)
+    accelerator = Accelerator(
+        gradient_accumulation_steps=cfg.grad_accum_steps,
+        mixed_precision=cfg.mixed_precision,
+        log_with="wandb" if cfg.wandb_enabled else None,
+    )
     logger.info(accelerator.state, main_process_only=False)
 
+    wandb_module = None
     if cfg.wandb_enabled:
         try:
-            import wandb  # noqa: F401
+            import wandb as wandb_module
         except ImportError as exc:
             raise ImportError(
                 "Weights & Biases logging is enabled but the 'wandb' package is not installed. "
@@ -126,7 +150,7 @@ def main():
         if cfg.wandb_tags:
             wandb_kwargs["tags"] = cfg.wandb_tags
         accelerator.init_trackers(project_name, config=dict(cfg.__dict__), init_kwargs={"wandb": wandb_kwargs})
-        print('Wands & Biases logging enabled.')
+        print('Weights & Biases logging enabled.')
 
     set_seed(cfg.seed + accelerator.process_index)
 
@@ -174,14 +198,65 @@ def main():
     # Noise scheduler
     noise_scheduler = DDPMScheduler.from_pretrained(cfg.model_id, subfolder="scheduler")
 
-    # Optimizer（LoRAパラメータのみ）
     if accelerator.mixed_precision == "fp16":
         dtype = torch.float16
     elif accelerator.mixed_precision == "bf16":
         dtype = torch.bfloat16
     else:
         dtype = torch.float32
-    
+
+    # checkpoint sampling helpers
+    sample_prompts = list(cfg.sample_prompts or ["chest x-ray, normal"])
+    samples_per_prompt = max(1, cfg.samples_per_prompt)
+    sample_pipeline = None
+    def generate_and_log_samples(step: int, adapter_dir: str):
+        nonlocal sample_pipeline
+        if not (cfg.wandb_enabled and wandb_module is not None and accelerator.is_main_process):
+            return
+        pipeline_dtype = torch.float32 if accelerator.device.type == "cpu" else dtype
+        if sample_pipeline is None:
+            sample_pipeline = StableDiffusionPipeline.from_pretrained(
+                cfg.model_id,
+                torch_dtype=pipeline_dtype,
+                safety_checker=None,
+            )
+            sample_pipeline.set_progress_bar_config(disable=True)
+            sample_pipeline = sample_pipeline.to(accelerator.device)
+        sample_pipeline.unet.load_attn_procs(adapter_dir)
+        generator_device = accelerator.device if accelerator.device.type != "meta" else torch.device("cpu")
+        generator = torch.Generator(device=generator_device)
+        base_seed = cfg.sample_seed if cfg.sample_seed is not None else cfg.seed
+        if base_seed is not None:
+            generator.manual_seed(base_seed + step)
+        with torch.inference_mode():
+            outputs = sample_pipeline(
+                sample_prompts,
+                num_inference_steps=cfg.sample_num_inference_steps,
+                guidance_scale=cfg.sample_guidance_scale,
+                num_images_per_prompt=samples_per_prompt,
+                generator=generator,
+            )
+        images = outputs.images
+        samples_dir = os.path.join(adapter_dir, "samples")
+        os.makedirs(samples_dir, exist_ok=True)
+        wandb_images = []
+        for idx, img in enumerate(images):
+            prompt_idx = idx // samples_per_prompt if samples_per_prompt else 0
+            sample_idx = idx % samples_per_prompt if samples_per_prompt else idx
+            prompt = sample_prompts[prompt_idx]
+            filename = f"step{step:06d}_prompt{prompt_idx:02d}_img{sample_idx:02d}.png"
+            img_path = os.path.join(samples_dir, filename)
+            img.save(img_path)
+            wandb_images.append(
+                wandb_module.Image(
+                    img,
+                    caption=f"{prompt} [step {step}, sample {sample_idx}]",
+                )
+            )
+        if wandb_images:
+            accelerator.log({"checkpoint/samples": wandb_images}, step=step)
+
+    # Optimizer（LoRAパラメータのみ）
     params_to_optimize = [p for p in unet.parameters() if p.requires_grad]
 
     optimizer = torch.optim.AdamW(
@@ -264,6 +339,7 @@ def main():
                     logger.info(f"Saved checkpoint to {save_dir}")
                     if cfg.wandb_enabled:
                         accelerator.log({"checkpoint/step": global_step}, step=global_step)
+                        generate_and_log_samples(global_step, save_path)
 
             if global_step >= cfg.max_train_steps:
                 break
@@ -275,8 +351,10 @@ def main():
     if accelerator.is_main_process:
         final_dir = os.path.join(args.output_dir, 'lora_unet')
         unwrapped = accelerator.unwrap_model(unet)
-        sunwrapped.save_attn_procs(final_dir)
+        unwrapped.save_attn_procs(final_dir)
         logger.info(f"Training complete. LoRA weights saved to {final_dir}")
+        if cfg.wandb_enabled:
+            generate_and_log_samples(global_step, final_dir)
 
     accelerator.wait_for_everyone()
     if cfg.wandb_enabled:
