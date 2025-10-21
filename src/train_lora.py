@@ -10,10 +10,7 @@ from accelerate import Accelerator
 from accelerate.logging import get_logger
 
 from diffusers import AutoencoderKL, UNet2DConditionModel, DDPMScheduler
-try:
-    from diffusers import LoRAConfig
-except ImportError:  # pragma: no cover - older diffusers fallback
-    LoRAConfig = None
+from peft import LoraConfig
 from diffusers.loaders import AttnProcsLayers
 from transformers import CLIPTextModel, CLIPTokenizer
 
@@ -129,6 +126,7 @@ def main():
         if cfg.wandb_tags:
             wandb_kwargs["tags"] = cfg.wandb_tags
         accelerator.init_trackers(project_name, config=dict(cfg.__dict__), init_kwargs={"wandb": wandb_kwargs})
+        print('Wands & Biases logging enabled.')
 
     set_seed(cfg.seed + accelerator.process_index)
 
@@ -151,44 +149,54 @@ def main():
     lora_alpha = cfg.lora_alpha
     lora_dropout = cfg.lora_dropout
 
-    def _set_lora(unet):
-        adapter_name = "default"
-        lora_config = LoRAConfig(
-                    r=lora_rank,
-                    lora_alpha=lora_alpha,
-                    lora_dropout=lora_dropout,
-                    init_lora_weights="gaussian",
-                )
-        unet.add_adapter(adapter_name=adapter_name, config=lora_config)
-        unet.set_adapter(adapter_name) 
-        return adapter_name
-
-    adapter_name = _set_lora(unet)
-    try:
-        attn_procs = AttnProcsLayers(unet.attn_processors, adapter_name=adapter_name)
-    except TypeError:
-        attn_procs = AttnProcsLayers(unet.attn_processors)
-
+    # UNet のアテンションに挿す典型モジュール
+    lora_config = LoraConfig(
+        r=lora_rank,
+        lora_alpha=lora_alpha,
+        lora_dropout=lora_dropout,
+        init_lora_weights="gaussian",
+        target_modules=["to_q", "to_k", "to_v", "to_out.0"],
+    )
+    
+    unet.add_adapter(lora_config)        
+    
     # Dataset & Dataloader
     dataset = ChestXrayDataset(args.dataset_dir, resolution=cfg.resolution)
-    train_loader = DataLoader(dataset, batch_size=cfg.train_batch_size, shuffle=True, num_workers=cfg.num_workers, pin_memory=True, drop_last=True)
+    train_loader = DataLoader(
+        dataset,
+        batch_size=cfg.train_batch_size,
+        shuffle=True,
+        num_workers=cfg.num_workers,
+        pin_memory=True,
+        drop_last=True,
+    )
 
     # Noise scheduler
-    noise_scheduler = DDPMScheduler.from_pretrained(cfg.model_id, subfolder='scheduler')
+    noise_scheduler = DDPMScheduler.from_pretrained(cfg.model_id, subfolder="scheduler")
 
-    # Optimizer
-    if accelerator.mixed_precision == 'fp16':
+    # Optimizer（LoRAパラメータのみ）
+    if accelerator.mixed_precision == "fp16":
         dtype = torch.float16
-    elif accelerator.mixed_precision == 'bf16':
+    elif accelerator.mixed_precision == "bf16":
         dtype = torch.bfloat16
     else:
         dtype = torch.float32
+    
+    params_to_optimize = [p for p in unet.parameters() if p.requires_grad]
 
-    optimizer = torch.optim.AdamW(attn_procs.parameters(), lr=cfg.learning_rate, betas=(0.9, 0.999), weight_decay=1e-2, eps=1e-8)
+    optimizer = torch.optim.AdamW(
+        params_to_optimize,
+        lr=cfg.learning_rate,
+        betas=(0.9, 0.999),
+        weight_decay=1e-2,
+        eps=1e-8,
+    )
 
-    # Prepare models
-    unet, optimizer, train_loader, text_encoder, vae = accelerator.prepare(unet, optimizer, train_loader, text_encoder, vae)
-    # tokenizer on CPU
+    # Prepare models（順序は LoRA → optimizer 作成 → prepare でOK）
+    unet, optimizer, train_loader, text_encoder, vae = accelerator.prepare(
+        unet, optimizer, train_loader, text_encoder, vae
+    )
+    # tokenizer は CPU のままでOK
 
     global_step = 0
     unet.train()
@@ -252,10 +260,7 @@ def main():
                     os.makedirs(save_dir, exist_ok=True)
                     save_path = os.path.join(save_dir, 'lora_unet')
                     unwrapped = accelerator.unwrap_model(unet)
-                    try:
-                        unwrapped.save_attn_procs(save_path, adapter_name=adapter_name)
-                    except TypeError:
-                        unwrapped.save_attn_procs(save_path)
+                    unwrapped.save_attn_procs(save_path)
                     logger.info(f"Saved checkpoint to {save_dir}")
                     if cfg.wandb_enabled:
                         accelerator.log({"checkpoint/step": global_step}, step=global_step)
@@ -270,10 +275,7 @@ def main():
     if accelerator.is_main_process:
         final_dir = os.path.join(args.output_dir, 'lora_unet')
         unwrapped = accelerator.unwrap_model(unet)
-        try:
-            unwrapped.save_attn_procs(final_dir, adapter_name=adapter_name)
-        except TypeError:
-            unwrapped.save_attn_procs(final_dir)
+        sunwrapped.save_attn_procs(final_dir)
         logger.info(f"Training complete. LoRA weights saved to {final_dir}")
 
     accelerator.wait_for_everyone()
